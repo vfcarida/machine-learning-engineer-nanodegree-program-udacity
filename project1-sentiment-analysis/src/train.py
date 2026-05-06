@@ -3,47 +3,65 @@ import json
 import os
 import pickle
 import sys
-import sagemaker_containers
+import logging
 import pandas as pd
 import torch
 import torch.optim as optim
 import torch.utils.data
+from typing import Tuple, Dict, Any
 
 from model import LSTMClassifier
 
-def model_fn(model_dir):
-    """Load the PyTorch model from the `model_dir` directory."""
-    print("Loading model.")
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-    # First, load the parameters used to create the model.
-    model_info = {}
+def model_fn(model_dir: str) -> LSTMClassifier:
+    """
+    Load the PyTorch model from the `model_dir` directory.
+    
+    Args:
+        model_dir (str): Directory where the model files are stored.
+        
+    Returns:
+        LSTMClassifier: The loaded model in evaluation mode.
+    """
+    logger.info("Loading model.")
+
     model_info_path = os.path.join(model_dir, 'model_info.pth')
     with open(model_info_path, 'rb') as f:
         model_info = torch.load(f)
 
-    print("model_info: {}".format(model_info))
+    logger.info(f"model_info: {model_info}")
 
-    # Determine the device and construct the model.
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = LSTMClassifier(model_info['embedding_dim'], model_info['hidden_dim'], model_info['vocab_size'])
 
-    # Load the stored model parameters.
     model_path = os.path.join(model_dir, 'model.pth')
     with open(model_path, 'rb') as f:
         model.load_state_dict(torch.load(f))
 
-    # Load the saved word_dict.
     word_dict_path = os.path.join(model_dir, 'word_dict.pkl')
     with open(word_dict_path, 'rb') as f:
         model.word_dict = pickle.load(f)
 
     model.to(device).eval()
 
-    print("Done loading model.")
+    logger.info("Done loading model.")
     return model
 
-def _get_train_data_loader(batch_size, training_dir):
-    print("Get train data loader.")
+def _get_train_data_loader(batch_size: int, training_dir: str) -> torch.utils.data.DataLoader:
+    """
+    Load training data from CSV and return a DataLoader.
+    
+    Args:
+        batch_size (int): Size of batches for training.
+        training_dir (str): Directory where train.csv is located.
+        
+    Returns:
+        DataLoader: PyTorch DataLoader for training data.
+    """
+    logger.info("Loading training data.")
 
     train_data = pd.read_csv(os.path.join(training_dir, "train.csv"), header=None, names=None)
 
@@ -54,46 +72,44 @@ def _get_train_data_loader(batch_size, training_dir):
 
     return torch.utils.data.DataLoader(train_ds, batch_size=batch_size)
 
-
-def train(model, train_loader, epochs, optimizer, loss_fn, device):
+def train(model: LSTMClassifier, 
+          train_loader: torch.utils.data.DataLoader, 
+          epochs: int, 
+          optimizer: torch.optim.Optimizer, 
+          loss_fn: torch.nn.Module, 
+          device: torch.device) -> None:
     """
-    This is the training method that is called by the PyTorch training script. The parameters
-    passed are as follows:
-    model        - The PyTorch model that we wish to train.
-    train_loader - The PyTorch DataLoader that should be used during training.
-    epochs       - The total number of epochs to train for.
-    optimizer    - The optimizer to use during training.
-    loss_fn      - The loss function used for training.
-    device       - Where the model and data should be loaded (gpu or cpu).
-    """
+    Standard training loop for the PyTorch model.
     
-    # TODO: Paste the train() method developed in the notebook here.
-
-     for epoch in range(1, epochs + 1):
+    Args:
+        model (LSTMClassifier): The PyTorch model to train.
+        train_loader (DataLoader): DataLoader providing training batches.
+        epochs (int): Number of training epochs.
+        optimizer (Optimizer): The optimizer for weight updates.
+        loss_fn (Module): The loss function.
+        device (device): Target device (CPU or GPU).
+    """
+    for epoch in range(1, epochs + 1):
         model.train()
         total_loss = 0
-        for batch in train_loader:         
+        for batch in train_loader:
             batch_X, batch_y = batch
             
             batch_X = batch_X.to(device)
             batch_y = batch_y.to(device)
             
-            # TODO: Complete this train method to train the model provided.
-            optimizer.zero_grad() # zero the parameter gradients
-            # forward + backward + optimize
-            output = model.forward(batch_X) #compute model output
-            loss = loss_fn(output, batch_y) #calculate loss
-            loss.backward() # compute gradients of all variables with respect to loss
-            optimizer.step() #perform updates using calculated gradients
+            optimizer.zero_grad()
+            output = model(batch_X)
+            loss = loss_fn(output, batch_y)
+            loss.backward()
+            optimizer.step()
             
-            total_loss += loss.data.item()
-        print("Epoch: {}, BCELoss: {}".format(epoch, total_loss / len(train_loader)))
-
+            total_loss += loss.item()
+        
+        avg_loss = total_loss / len(train_loader)
+        logger.info(f"Epoch: {epoch}, BCELoss: {avg_loss:.6f}")
 
 if __name__ == '__main__':
-    # All of the model parameters and training parameters are sent as arguments when the script
-    # is executed. Here we set up an argument parser to easily access the parameters.
-
     parser = argparse.ArgumentParser()
 
     # Training Parameters
@@ -113,33 +129,36 @@ if __name__ == '__main__':
                         help='size of the vocabulary (default: 5000)')
 
     # SageMaker Parameters
-    parser.add_argument('--hosts', type=list, default=json.loads(os.environ['SM_HOSTS']))
-    parser.add_argument('--current-host', type=str, default=os.environ['SM_CURRENT_HOST'])
-    parser.add_argument('--model-dir', type=str, default=os.environ['SM_MODEL_DIR'])
-    parser.add_argument('--data-dir', type=str, default=os.environ['SM_CHANNEL_TRAINING'])
-    parser.add_argument('--num-gpus', type=int, default=os.environ['SM_NUM_GPUS'])
+    parser.add_argument('--hosts', type=list, default=json.loads(os.environ.get('SM_HOSTS', '[]')))
+    parser.add_argument('--current-host', type=str, default=os.environ.get('SM_CURRENT_HOST', 'localhost'))
+    parser.add_argument('--model-dir', type=str, default=os.environ.get('SM_MODEL_DIR', '.'))
+    parser.add_argument('--data-dir', type=str, default=os.environ.get('SM_CHANNEL_TRAINING', '.'))
+    parser.add_argument('--num-gpus', type=int, default=int(os.environ.get('SM_NUM_GPUS', 0)))
 
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print("Using device {}.".format(device))
+    logger.info(f"Using device {device}.")
 
     torch.manual_seed(args.seed)
 
-    # Load the training data.
+    # Load the training data
     train_loader = _get_train_data_loader(args.batch_size, args.data_dir)
 
-    # Build the model.
+    # Build the model
     model = LSTMClassifier(args.embedding_dim, args.hidden_dim, args.vocab_size).to(device)
 
-    with open(os.path.join(args.data_dir, "word_dict.pkl"), "rb") as f:
-        model.word_dict = pickle.load(f)
+    word_dict_path = os.path.join(args.data_dir, "word_dict.pkl")
+    try:
+        with open(word_dict_path, "rb") as f:
+            model.word_dict = pickle.load(f)
+    except FileNotFoundError:
+        logger.warning("word_dict.pkl not found in data-dir. Ensure it is provided if needed for inference.")
 
-    print("Model loaded with embedding_dim {}, hidden_dim {}, vocab_size {}.".format(
-        args.embedding_dim, args.hidden_dim, args.vocab_size
-    ))
+    logger.info(f"Model initialized with embedding_dim {args.embedding_dim}, "
+                f"hidden_dim {args.hidden_dim}, vocab_size {args.vocab_size}.")
 
-    # Train the model.
+    # Train the model
     optimizer = optim.Adam(model.parameters())
     loss_fn = torch.nn.BCELoss()
 
@@ -155,12 +174,15 @@ if __name__ == '__main__':
         }
         torch.save(model_info, f)
 
-	# Save the word_dict
-    word_dict_path = os.path.join(args.model_dir, 'word_dict.pkl')
-    with open(word_dict_path, 'wb') as f:
-        pickle.dump(model.word_dict, f)
+    # Save the word_dict
+    if model.word_dict:
+        word_dict_path = os.path.join(args.model_dir, 'word_dict.pkl')
+        with open(word_dict_path, 'wb') as f:
+            pickle.dump(model.word_dict, f)
 
-	# Save the model parameters
+    # Save the model parameters
     model_path = os.path.join(args.model_dir, 'model.pth')
     with open(model_path, 'wb') as f:
         torch.save(model.cpu().state_dict(), f)
+    
+    logger.info("Training complete. Model saved.")

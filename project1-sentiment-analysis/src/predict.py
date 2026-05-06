@@ -3,99 +3,137 @@ import json
 import os
 import pickle
 import sys
-import sagemaker_containers
-import pandas as pd
+import logging
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.optim as optim
-import torch.utils.data
+from typing import Any, Dict, Union
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 from model import LSTMClassifier
-
 from utils import review_to_words, convert_and_pad
 
-def model_fn(model_dir):
-    """Load the PyTorch model from the `model_dir` directory."""
-    print("Loading model.")
+def model_fn(model_dir: str) -> LSTMClassifier:
+    """
+    Load the PyTorch model from the `model_dir` directory.
+    
+    Args:
+        model_dir (str): Directory where the model files are stored.
+        
+    Returns:
+        LSTMClassifier: The loaded model in evaluation mode.
+    """
+    logger.info("Loading model.")
 
-    # First, load the parameters used to create the model.
-    model_info = {}
+    # Load the parameters used to create the model
     model_info_path = os.path.join(model_dir, 'model_info.pth')
-    with open(model_info_path, 'rb') as f:
-        model_info = torch.load(f)
+    try:
+        with open(model_info_path, 'rb') as f:
+            model_info = torch.load(f)
+        logger.info(f"Model info: {model_info}")
+    except FileNotFoundError:
+        logger.error(f"model_info.pth not found in {model_dir}")
+        raise
 
-    print("model_info: {}".format(model_info))
-
-    # Determine the device and construct the model.
+    # Determine the device and construct the model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = LSTMClassifier(model_info['embedding_dim'], model_info['hidden_dim'], model_info['vocab_size'])
 
-    # Load the store model parameters.
+    # Load the stored model parameters
     model_path = os.path.join(model_dir, 'model.pth')
-    with open(model_path, 'rb') as f:
-        model.load_state_dict(torch.load(f))
+    try:
+        with open(model_path, 'rb') as f:
+            model.load_state_dict(torch.load(f, map_location=device))
+    except FileNotFoundError:
+        logger.error(f"model.pth not found in {model_dir}")
+        raise
 
-    # Load the saved word_dict.
+    # Load the saved word_dict
     word_dict_path = os.path.join(model_dir, 'word_dict.pkl')
-    with open(word_dict_path, 'rb') as f:
-        model.word_dict = pickle.load(f)
+    try:
+        with open(word_dict_path, 'rb') as f:
+            model.word_dict = pickle.load(f)
+    except FileNotFoundError:
+        logger.error(f"word_dict.pkl not found in {model_dir}")
+        raise
 
     model.to(device).eval()
 
-    print("Done loading model.")
+    logger.info("Done loading model.")
     return model
 
-def input_fn(serialized_input_data, content_type):
-    print('Deserializing the input data.')
+def input_fn(serialized_input_data: bytes, content_type: str) -> str:
+    """
+    Deserialize the input data.
+    
+    Args:
+        serialized_input_data (bytes): The raw request body.
+        content_type (str): The content type of the request.
+        
+    Returns:
+        str: The decoded input string.
+    """
+    logger.info(f"Deserializing input data of type: {content_type}")
     if content_type == 'text/plain':
-        data = serialized_input_data.decode('utf-8')
-        return data
-    raise Exception('Requested unsupported ContentType in content_type: ' + content_type)
+        return serialized_input_data.decode('utf-8')
+    raise ValueError(f"Unsupported content type: {content_type}. Expected 'text/plain'.")
 
-def output_fn(prediction_output, accept):
-    print('Serializing the generated output.')
+def output_fn(prediction_output: int, accept: str) -> str:
+    """
+    Serialize the prediction output.
+    
+    Args:
+        prediction_output (int): The prediction result (0 or 1).
+        accept (str): The requested content type for the response.
+        
+    Returns:
+        str: String representation of the result.
+    """
+    logger.info(f"Serializing generated output for accept type: {accept}")
     return str(prediction_output)
 
-def predict_fn(input_data, model):
-    print('Inferring sentiment of input data.')
+def predict_fn(input_data: str, model: LSTMClassifier) -> int:
+    """
+    Perform inference on the input data using the provided model.
+    
+    Args:
+        input_data (str): The raw review text.
+        model (LSTMClassifier): The trained sentiment analysis model.
+        
+    Returns:
+        int: Prediction result (1 for positive, 0 for negative).
+    """
+    logger.info("Inferring sentiment of input data.")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     if model.word_dict is None:
-        raise Exception('Model has not been loaded properly, no word_dict.')
+        raise RuntimeError("Model word_dict is missing. Prediction cannot proceed.")
     
-    # TODO: Process input_data so that it is ready to be sent to our model.
-    #       You should produce two variables:
-    #         data_X   - A sequence of length 500 which represents the converted review
-    #         data_len - The length of the review
-
-
-    data_X = None
-    data_len = None
+    # Preprocess the input review
     words = review_to_words(input_data)
     data_X, data_len = convert_and_pad(model.word_dict, words)
 
-    # Using data_X and data_len we construct an appropriate input tensor. Remember
-    # that our model expects input data of the form 'len, review[500]'.
+    # Construct input tensor. Model expects format: [length, review_sequence]
     data_pack = np.hstack((data_len, data_X))
     data_pack = data_pack.reshape(1, -1)
     
-    data = torch.from_numpy(data_pack)
-    data = data.to(device)
+    data = torch.from_numpy(data_pack).to(device)
 
-    # Make sure to put the model into evaluation mode
+    # Ensure model is in evaluation mode
     model.eval()
 
-    # TODO: Compute the result of applying the model to the input data. The variable `result` should
-    #       be a numpy array which contains a single integer which is either 1 or 0
-
-    result = None
     with torch.no_grad():
-        #output = predictor.predict(data)
-        output = model.forward(data)
+        output = model(data)
     
-    #output = output.cpu()
-    result = int(np.round(output.numpy()))
+    # Round output to get binary classification
+    result = int(np.round(output.cpu().numpy()))
 
     return result
+
+if __name__ == '__main__':
+    # This script is primarily intended for use with SageMaker inference
+    # but can be executed directly for basic testing if needed.
+    pass

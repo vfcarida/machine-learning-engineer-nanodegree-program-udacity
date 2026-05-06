@@ -1,52 +1,60 @@
-from __future__ import print_function
-
 import argparse
 import os
+import logging
 import pandas as pd
-from sklearn.externals import joblib
+import joblib
 from sklearn.svm import LinearSVC
+from typing import Any
 
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-#model load function
-def model_fn(model_dir):
-    """Load model from the model_dir. This is the same model that is saved
-    in the main if statement.
+def model_fn(model_dir: str) -> Any:
     """
-    print("Loading model.")
-
-    #load using joblib
+    Load the trained model from the model_dir.
+    
+    Args:
+        model_dir (str): Directory where the model is saved.
+        
+    Returns:
+        Any: The loaded sklearn model.
+    """
+    logger.info("Loading model.")
     model = joblib.load(os.path.join(model_dir, "model.joblib"))
-    print("Done loading model.")
-
+    logger.info("Done loading model.")
     return model
 
 if __name__ == '__main__':
-    #All of the model parameters and training parameters are sent as arguments
-    #when this script is executed, during a training job
-
-    #Here we set up an argument parser to easily access the parameters
     parser = argparse.ArgumentParser()
 
-    #SageMaker parameters, like the directories for training data and saving models; set automatically
-    #Do not need to change
-    parser.add_argument('--output-data-dir', type=str, default=os.environ['SM_OUTPUT_DATA_DIR'])
-    parser.add_argument('--model-dir', type=str, default=os.environ['SM_MODEL_DIR'])
-    parser.add_argument('--data-dir', type=str, default=os.environ['SM_CHANNEL_TRAIN'])
+    # SageMaker parameters
+    parser.add_argument('--output-data-dir', type=str, default=os.environ.get('SM_OUTPUT_DATA_DIR', '.'))
+    parser.add_argument('--model-dir', type=str, default=os.environ.get('SM_MODEL_DIR', '.'))
+    parser.add_argument('--data-dir', type=str, default=os.environ.get('SM_CHANNEL_TRAIN', '.'))
 
-    #args holds all passed-in arguments
     args = parser.parse_args()
 
-    #Read in csv training file
-    training_dir = args.data_dir
-    train_data = pd.read_csv(os.path.join(training_dir, "train.csv"), header=None, names=None)
+    # Read in CSV training file
+    training_path = os.path.join(args.data_dir, "train.csv")
+    logger.info(f"Reading training data from: {training_path}")
+    
+    try:
+        train_data = pd.read_csv(training_path, header=None)
+    except Exception as e:
+        logger.error(f"Failed to read training data: {e}")
+        raise
 
-    #Labels are in the first column
+    # Labels are in the first column, features in the rest
     train_y = train_data.iloc[:, 0]
     train_x = train_data.iloc[:, 1:]
 
+    logger.info(f"Training LinearSVC model with {len(train_data)} samples.")
     model = LinearSVC()
-
     model.fit(train_x, train_y)
 
-    #Save the trained model
-    joblib.dump(model, os.path.join(args.model_dir, "model.joblib"))
+    # Save the trained model
+    model_save_path = os.path.join(args.model_dir, "model.joblib")
+    logger.info(f"Saving model to: {model_save_path}")
+    joblib.dump(model, model_save_path)
+    logger.info("Model saved successfully.")

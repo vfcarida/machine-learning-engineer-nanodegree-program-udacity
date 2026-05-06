@@ -1,55 +1,71 @@
 import re
 import pandas as pd
-import operator 
+import operator
+import logging
+from pathlib import Path
+from typing import Dict, List, Any, Optional
 
-# Add 'datatype' column that indicates if the record is original wiki answer as 0, training data 1, test data 2, onto 
-# the dataframe - uses stratified random sampling (with seed) to sample by task & plagiarism amount 
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-# Use function to label datatype for training 1 or test 2 
-def create_datatype(df, train_value, test_value, datatype_var, compare_dfcolumn, operator_of_compare, value_of_compare,
-                    sampling_number, sampling_seed):
-    # Subsets dataframe by condition relating to statement built from:
-    # 'compare_dfcolumn' 'operator_of_compare' 'value_of_compare'
-    df_subset = df[operator_of_compare(df[compare_dfcolumn], value_of_compare)]
-    df_subset = df_subset.drop(columns = [datatype_var])
+def create_datatype(df: pd.DataFrame, 
+                    train_value: int, 
+                    test_value: int, 
+                    datatype_var: str, 
+                    compare_dfcolumn: str, 
+                    operator_of_compare: Any, 
+                    value_of_compare: Any,
+                    sampling_number: int, 
+                    sampling_seed: int) -> None:
+    """
+    Labels records in the dataframe as training or test based on stratified random sampling.
     
-    # Prints counts by task and compare_dfcolumn for subset df
-    #print("\nCounts by Task & " + compare_dfcolumn + ":\n", df_subset.groupby(['Task', compare_dfcolumn]).size().reset_index(name="Counts") )
+    Args:
+        df: The main dataframe to modify.
+        train_value: Value to assign for training records.
+        test_value: Value to assign for test records.
+        datatype_var: Column name where labels will be stored.
+        compare_dfcolumn: Column to use for subsetting.
+        operator_of_compare: Operator (e.g. operator.gt) to compare compare_dfcolumn with value_of_compare.
+        value_of_compare: Value to compare against.
+        sampling_number: Number of samples to take per group for the test set.
+        sampling_seed: Random seed for reproducibility.
+    """
+    # Subsets dataframe by condition
+    df_subset = df[operator_of_compare(df[compare_dfcolumn], value_of_compare)].copy()
     
-    # Sets all datatype to value for training for df_subset
+    if datatype_var in df_subset.columns:
+        df_subset = df_subset.drop(columns=[datatype_var])
+    
+    # Sets all datatype to value for training initially
     df_subset.loc[:, datatype_var] = train_value
     
-    # Performs stratified random sample of subset dataframe to create new df with subset values 
-    df_sampled = df_subset.groupby(['Task', compare_dfcolumn], group_keys=False).apply(lambda x: x.sample(min(len(x), sampling_number), random_state = sampling_seed))
-    df_sampled = df_sampled.drop(columns = [datatype_var])
-    # Sets all datatype to value for test_value for df_sampled
-    df_sampled.loc[:, datatype_var] = test_value
+    # Performs stratified random sample to identify test cases
+    df_sampled = df_subset.groupby(['Task', compare_dfcolumn], group_keys=False).apply(
+        lambda x: x.sample(min(len(x), sampling_number), random_state=sampling_seed)
+    )
     
-    # Prints counts by compare_dfcolumn for selected sample
-    #print("\nCounts by "+ compare_dfcolumn + ":\n", df_sampled.groupby([compare_dfcolumn]).size().reset_index(name="Counts") )
-    #print("\nSampled DF:\n",df_sampled)
-    
-    # Labels all datatype_var column as train_value which will be overwritten to 
-    # test_value in next for loop for all test cases chosen with stratified sample
-    for index in df_sampled.index: 
-        # Labels all datatype_var columns with test_value for straified test sample
-        df_subset.loc[index, datatype_var] = test_value
-
-    #print("\nSubset DF:\n",df_subset)
-    # Adds test_value and train_value for all relevant data in main dataframe
+    # Update the main dataframe with the labels
     for index in df_subset.index:
-        # Labels all datatype_var columns in df with train_value/test_value based upon 
-        # stratified test sample and subset of df
-        df.loc[index, datatype_var] = df_subset.loc[index, datatype_var]
+        label = test_value if index in df_sampled.index else train_value
+        df.at[index, datatype_var] = label
 
-    # returns nothing because dataframe df already altered 
+def train_test_dataframe(clean_df: pd.DataFrame, random_seed: int = 100) -> pd.DataFrame:
+    """
+    Creates training and test labels for the plagiarism dataset.
     
-def train_test_dataframe(clean_df, random_seed=100):
-    
+    Args:
+        clean_df: Dataframe containing the cleaned file information.
+        random_seed: Random seed for sampling.
+        
+    Returns:
+        pd.DataFrame: Dataframe with an added 'Datatype' column.
+    """
     new_df = clean_df.copy()
 
-    # Initialize datatype as 0 initially for all records - after function 0 will remain only for original wiki answers
-    new_df.loc[:,'Datatype'] = 0
+    # Initialize datatype as 0 (original wiki answers)
+    new_df.loc[:, 'Datatype'] = 0
 
     # Creates test & training datatypes for plagiarized answers (1,2,3)
     create_datatype(new_df, 1, 2, 'Datatype', 'Category', operator.gt, 0, 1, random_seed)
@@ -57,56 +73,57 @@ def train_test_dataframe(clean_df, random_seed=100):
     # Creates test & training datatypes for NON-plagiarized answers (0)
     create_datatype(new_df, 1, 2, 'Datatype', 'Category', operator.eq, 0, 2, random_seed)
     
-    # creating a dictionary of categorical:numerical mappings for plagiarsm categories
-    mapping = {0:'orig', 1:'train', 2:'test'} 
-
-    # traversing through dataframe and replacing categorical data
-    new_df.Datatype = [mapping[item] for item in new_df.Datatype] 
+    # Map numerical labels to descriptive strings
+    mapping = {0: 'orig', 1: 'train', 2: 'test'}
+    new_df['Datatype'] = new_df['Datatype'].map(mapping)
 
     return new_df
 
-
-# helper function for pre-processing text given a file
-def process_file(file):
-    # put text in all lower case letters 
+def process_file(file: Any) -> str:
+    """
+    Standardizes text by converting to lowercase and removing non-alphanumeric characters.
+    
+    Args:
+        file: A file object to read from.
+        
+    Returns:
+        str: Processed text.
+    """
+    # Put text in all lower case letters 
     all_text = file.read().lower()
 
-    # remove all non-alphanumeric chars
+    # Remove all non-alphanumeric chars and collapse whitespace
     all_text = re.sub(r"[^a-zA-Z0-9]", " ", all_text)
-    # remove newlines/tabs, etc. so it's easier to match phrases, later
-    all_text = re.sub(r"\t", " ", all_text)
-    all_text = re.sub(r"\n", " ", all_text)
-    all_text = re.sub("  ", " ", all_text)
-    all_text = re.sub("   ", " ", all_text)
+    all_text = re.sub(r"\s+", " ", all_text).strip()
     
     return all_text
 
-
-def create_text_column(df, file_directory='data/'):
-    '''Reads in the files, listed in a df and returns that df with an additional column, `Text`. 
-       :param df: A dataframe of file information including a column for `File`
-       :param file_directory: the main directory where files are stored
-       :return: A dataframe with processed text '''
-   
-    # create copy to modify
+def create_text_column(df: pd.DataFrame, file_directory: str = 'data/') -> pd.DataFrame:
+    """
+    Reads in files listed in a dataframe and adds a 'Text' column with processed content.
+    
+    Args:
+        df: Dataframe with a 'File' column.
+        file_directory: Directory where files are stored.
+        
+    Returns:
+        pd.DataFrame: Dataframe with an additional 'Text' column.
+    """
     text_df = df.copy()
+    text_list = []
     
-    # store processed text
-    text = []
+    base_path = Path(file_directory)
     
-    # for each file (row) in the df, read in the file 
-    for row_i in df.index:
-        filename = df.iloc[row_i]['File']
-        #print(filename)
-        file_path = file_directory + filename
-        with open(file_path, 'r', encoding='utf-8', errors='ignore') as file:
-
-            # standardize text using helper function
-            file_text = process_file(file)
-            # append processed text to list
-            text.append(file_text)
+    for _, row in df.iterrows():
+        file_path = base_path / row['File']
+        
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as file:
+                processed_text = process_file(file)
+                text_list.append(processed_text)
+        except FileNotFoundError:
+            logger.error(f"File not found: {file_path}")
+            text_list.append("")
     
-    # add column to the copied dataframe
-    text_df['Text'] = text
-    
+    text_df['Text'] = text_list
     return text_df
